@@ -543,20 +543,33 @@ int process_wait(tid_t child_tid) {
 void process_exit(void) {
   // 현재 종료 중인 프로세스(thread)를 가져옴
   struct thread *current_thread = thread_current();
+  // 현재 스레드의 mmap 리스트를 순회함
+  // for (struct list_elem *i = list_begin(&current_thread->mm_list);
+  //      i != list_end(&current_thread->mm_list); i = i->next) {
+  //   // 리스트 요소 i를 thread 구조체로 변환
+  //   struct mmap_info *mif = list_entry(i, struct mmap_info, elem);
+  //   do_munmap(mif->start_addr);
+  // }
 
   // 파일 디스크럽터 테이블(FDT)이 존재한다면 열린 파일을 모두 닫는다.
   if (current_thread->FDT != NULL) {
     for (int fd = 0; fd < MAX_FD; fd++) {
       if (current_thread->FDT[fd] != NULL) {
-        syscall_close(
-            fd);  // dup_count와 STDIN/STDOUT 카운트를 반영하며 안전하게 닫기
+        // dup_count와 STDIN/STDOUT 카운트를 반영하며 안전하게 닫기
+        syscall_close(fd);
       }
     }
     // 파일 디스크럽터 테이블에 할당했던 메모리 해제
     palloc_free_multiple(current_thread->FDT, FDT_PAGES);
   }
+  // rox-child용
+  if (current_thread->running_file) {
+    file_allow_write(current_thread->running_file);  //
+    file_close(current_thread->running_file);
+    current_thread->running_file = NULL;
+  }
 
-  file_close(current_thread->running_file);
+  // file_close(current_thread->running_file);
 
   // syscall의 exit에서 exit_status 설정이 선행되어야함
   if (current_thread->parent != NULL) {
@@ -566,7 +579,6 @@ void process_exit(void) {
       sema_down(&current_thread->exit_sema);
     }
   }
-
   process_cleanup();
 }
 
