@@ -66,16 +66,18 @@ void *do_mmap(void *addr, size_t length, int writable, struct file *file,
               off_t offset) {
   // 반환할 주소
   void *start_addr = addr;
-  // 파일은 새로 열어야 함
+  // fd는 닫혀도 매핑된 영역은 사용해야하기 때문에 독립적인 파일이 필요
   struct file *reopened = file_reopen(file);
   if (reopened == NULL) return NULL;
 
+  // munmap 시 필요한 정보
   struct mmap_info *mp_info = malloc(sizeof(struct mmap_info));
   if (mp_info == NULL) return NULL;
 
   mp_info->file = reopened;
   mp_info->start_addr = start_addr;
   mp_info->page_cnt = 0;
+  // 스레드에 저장하는 이유는 스레드 exit 시에 mmap한 영역해제 위함
   list_push_back(&thread_current()->mm_list, &mp_info->elem);
 
   // 페이지마다 매핑
@@ -112,18 +114,22 @@ void *do_mmap(void *addr, size_t length, int writable, struct file *file,
 void do_munmap(void *addr) {
   struct thread *t = thread_current();
   struct page *page = spt_find_page(&t->spt, addr);
+  // 가상주소에 할당된 페이지가 없거나, 파일관련 객체가 아닐때
   if (page == NULL || page->mmap_info == NULL) return;
 
   struct mmap_info *mp = page->mmap_info;
   void *cur = mp->start_addr;
 
+  // start주소부터 count 만큼 페이지를 삭제
   for (int i = 0; i < mp->page_cnt; i++) {
     struct page *p = spt_find_page(&t->spt, cur);
     if (p) spt_remove_page(&t->spt, p);  // → destroy에서 dirty 처리
     cur += PGSIZE;
   }
 
+  // 파일 닫기
   file_close(mp->file);
+  // 현재스레드에서 삭제
   list_remove(&mp->elem);
   free(mp);
 }

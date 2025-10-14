@@ -539,46 +539,47 @@ int process_wait(tid_t child_tid) {
   return stat;
 }
 
-/* Exit the process. This function is called by thread_exit (). */
+/**
+ * 1. mmap 영역삭제
+ * 2. fdt 삭제
+ * 3. running파일 삭제
+ * 4. spt + pte 삭제
+ */
 void process_exit(void) {
   // 현재 종료 중인 프로세스(thread)를 가져옴
-  struct thread *current_thread = thread_current();
-  // 현재 스레드의 mmap 리스트를 순회함
-  // for (struct list_elem *i = list_begin(&current_thread->mm_list);
-  //      i != list_end(&current_thread->mm_list); i = i->next) {
-  //   // 리스트 요소 i를 thread 구조체로 변환
-  //   struct mmap_info *mif = list_entry(i, struct mmap_info, elem);
-  //   do_munmap(mif->start_addr);
-  // }
+  struct thread *t = thread_current();
+  // 현재 스레드의 mmap 리스트를 순회하면서 해제
+  struct list_elem *e = list_begin(&t->mm_list);
+  for (e; e != list_end(&t->mm_list);) {
+    struct mmap_info *mp = list_entry(e, struct mmap_info, elem);
+    e = list_next(e);  // 다음 원소 미리 저장 (안에서 삭제됨)
+    do_munmap(mp->start_addr);
+  }
 
   // 파일 디스크럽터 테이블(FDT)이 존재한다면 열린 파일을 모두 닫는다.
-  if (current_thread->FDT != NULL) {
+  if (t->FDT != NULL) {
     for (int fd = 0; fd < MAX_FD; fd++) {
-      if (current_thread->FDT[fd] != NULL) {
+      if (t->FDT[fd] != NULL) {
         // dup_count와 STDIN/STDOUT 카운트를 반영하며 안전하게 닫기
         syscall_close(fd);
       }
     }
     // 파일 디스크럽터 테이블에 할당했던 메모리 해제
-    palloc_free_multiple(current_thread->FDT, FDT_PAGES);
-  }
-  // rox-child용
-  if (current_thread->running_file) {
-    file_allow_write(current_thread->running_file);  //
-    file_close(current_thread->running_file);
-    current_thread->running_file = NULL;
+    palloc_free_multiple(t->FDT, FDT_PAGES);
   }
 
-  // file_close(current_thread->running_file);
+  file_close(t->running_file);
+  t->running_file = NULL;
 
   // syscall의 exit에서 exit_status 설정이 선행되어야함
-  if (current_thread->parent != NULL) {
-    sema_up(&current_thread->wait_sema);
+  if (t->parent != NULL) {
+    sema_up(&t->wait_sema);
     // 부모가 살아 있고(또는 기다릴 의사 표시가 됐다면)만 기다림
-    if (current_thread->parent->status != THREAD_DYING) {
-      sema_down(&current_thread->exit_sema);
+    if (t->parent->status != THREAD_DYING) {
+      sema_down(&t->exit_sema);
     }
   }
+  // 모든 spt삭제
   process_cleanup();
 }
 
@@ -595,13 +596,6 @@ static void process_cleanup(void) {
    * to the kernel-only page directory. */
   pml4 = curr->pml4;
   if (pml4 != NULL) {
-    /* Correct ordering here is crucial.  We must set
-     * cur->pagedir to NULL before switching page directories,
-     * so that a timer interrupt can't switch back to the
-     * process page directory.  We must activate the base page
-     * directory before destroying the process's page
-     * directory, or our active page directory will be one
-     * that's been freed (and cleared). */
     curr->pml4 = NULL;
     pml4_activate(NULL);
     pml4_destroy(pml4);
