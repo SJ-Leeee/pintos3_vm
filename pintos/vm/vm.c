@@ -172,6 +172,7 @@ static struct frame *vm_evict_frame(void) {
  * 프레임을 malloc, kva를 palloc 하고 반환*/
 static struct frame *vm_get_frame(void) {
   struct frame *frame = NULL;
+  // 물리메모리에 대응되는 커널주소
   void *kva = palloc_get_page(PAL_USER | PAL_ZERO);
   if (kva == NULL) {
     frame = vm_evict_frame();

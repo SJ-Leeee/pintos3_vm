@@ -46,16 +46,18 @@ struct thread;
  * page_cache(project4))를 가진다. 이 구조체에 정의된 기본 멤버는 절대
  * 삭제하거나 수정하지 말 것. */
 struct page {
+  /* 페이지의 종류와 수행할 동작 */
   const struct page_operations *operations;
-  void *va;            /* 사용자 공간 기준의 가상 주소 */
-  struct frame *frame; /* 해당 물리 프레임을 가리키는 역참조 */
+  /* 사용자 공간 기준의 가상 주소 */
+  void *va;
+  /* 해당 물리 프레임을 가리키는 역참조 */
+  struct frame *frame;
 
-  /* 구현해야 할 부분 */
-  struct hash_elem hash_elem;  // hash 소속elem
+  /* spt(hash) 에 소속되는 elem */
+  struct hash_elem hash_elem;
   bool writable;
-  /* 타입별 데이터는 union에 묶여 있다.
-   * 각 함수는 현재 union 타입을 자동으로 감지한다. */
 
+  /* operation에 type에 따른 정보들 */
   union {
     struct uninit_page uninit;
     struct anon_page anon;
@@ -64,7 +66,7 @@ struct page {
     struct page_cache page_cache;
 #endif
   };
-
+  /* mmap 관련 정보*/
   struct mmap_info *mmap_info;
   size_t mmap_page_index;
 };
