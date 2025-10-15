@@ -22,8 +22,6 @@
 #include "userprog/gdt.h"
 #include "userprog/process.h"
 
-struct lock filesys_lock;  // 파일 시스템 동기화용 전역 락
-
 #ifndef STDIN_FILENO
 #define STDIN_FILENO 0  // 표준 입력 파일 디스크립터 번호
 #endif
@@ -180,26 +178,21 @@ int syscall_dup2(int oldfd, int newfd) {
   if (oldfd < 0 || oldfd >= MAX_FD || newfd < 0 || newfd >= MAX_FD) {
     return -1;  // 허용 범위를 벗어나면 실패 처리
   }
+  // 원본 fd에 연결된 파일 객체 조회
+  struct file *old_file = process_get_file(oldfd);
+  // 원본 fd가 열려 있지 않다면 복제 불가
+  if (old_file == NULL) return -1;
 
-  struct file *old_file =
-      process_get_file(oldfd);  // 원본 fd에 연결된 파일 객체 조회
+  // STDIN 더미 파일 포인터 캐싱
+  struct file *stdin_file = syscall_get_std_file(STDIN_FILENO);
+  // STDOUT 더미 파일 포인터 캐싱
+  struct file *stdout_file = syscall_get_std_file(STDOUT_FILENO);
 
-  if (old_file == NULL) {
-    return -1;  // 원본 fd가 열려 있지 않다면 복제 불가
-  }
+  // STDIN이 이미 모두 닫힌 상태라면 복제할 수 없음
+  if (old_file == stdin_file && current->stdin_count == 0) return -1;
 
-  struct file *stdin_file =
-      syscall_get_std_file(STDIN_FILENO);  // STDIN 더미 파일 포인터 캐싱
-  struct file *stdout_file =
-      syscall_get_std_file(STDOUT_FILENO);  // STDOUT 더미 파일 포인터 캐싱
-
-  if (old_file == stdin_file && current->stdin_count == 0) {
-    return -1;  // STDIN이 이미 모두 닫힌 상태라면 복제할 수 없음
-  }
-
-  if (old_file == stdout_file && current->stdout_count == 0) {
-    return -1;  // STDOUT이 이미 모두 닫힌 상태라면 복제할 수 없음
-  }
+  // STDOUT이 이미 모두 닫힌 상태라면 복제할 수 없음
+  if (old_file == stdout_file && current->stdout_count == 0) return -1;
 
   syscall_close(newfd);  // 대상 fd가 열려 있다면 먼저 닫아서 자리 확보
 
@@ -230,9 +223,7 @@ unsigned syscall_tell(int fd) {
   struct file *file = process_get_file(fd);
 
   // 유효하지 않은 fd이면 0 반환 (unsigned 타입이므로 -1 대신 0 사용)
-  if (file == NULL) {
-    return 0;
-  }
+  if (file == NULL) return 0;
 
   // 현재 파일의 읽기/쓰기 위치(offset)를 반환
   return file_tell(file);
@@ -243,34 +234,26 @@ void syscall_seek(int fd, unsigned position) {
   struct file *file = process_get_file(fd);
 
   // 유효하지 않은 fd이면 아무 작업도 하지 않고 종료
-  if (file == NULL) {
-    return;
-  }
+  if (file == NULL) return;
 
   // 파일의 읽기/쓰기 위치를 지정된 위치로 변경
   file_seek(file, position);
 }
 
 void syscall_close(int fd) {
-  if (fd < 0 || fd >= MAX_FD) {
-    return;  // 허용 범위를 벗어난 fd는 무시
-  }
+  if (fd < 0 || fd >= MAX_FD) return;  // 허용 범위를 벗어난 fd는 무시
 
   struct thread *current = thread_current();  // 현재 스레드 포인터 획득
-  if (current->FDT == NULL) {
-    return;  // FDT가 준비되지 않았다면 닫을 항목이 없음
-  }
+  if (current->FDT == NULL) return;  // FDT가 준비되지 않았다면 닫을 항목이 없음
 
   struct file *file = current->FDT[fd];  // FDT에서 대상 파일 객체 확인
 
-  if (file == NULL) {
-    return;  // 이미 닫힌 fd는 추가 작업 불필요
-  }
+  if (file == NULL) return;  // 이미 닫힌 fd는 추가 작업 불필요
 
-  struct file *stdin_file =
-      syscall_get_std_file(STDIN_FILENO);  // STDIN 더미 파일 포인터 준비
-  struct file *stdout_file =
-      syscall_get_std_file(STDOUT_FILENO);  // STDOUT 더미 파일 포인터 준비
+  // STDIN 더미 파일 포인터 준비
+  struct file *stdin_file = syscall_get_std_file(STDIN_FILENO);
+  // STDOUT 더미 파일 포인터 준비
+  struct file *stdout_file = syscall_get_std_file(STDOUT_FILENO);
 
   if (file == stdin_file) {
     if (current->stdin_count > 0) {
@@ -336,12 +319,9 @@ int syscall_read(int fd, void *buffer, unsigned size) {
   // check_user_buffer(buffer, size, true);
   if (!only_user_addr(buffer)) syscall_exit(-1);
 
-  // 페이지를 찾는다 - buffere 주소에 맞는 // 매 페이지마다.
-  // 페이지가 null이면 그냥 진행
-  // 페이지가 있는데 writable이 false면은 syscall_exit(-1) or return false
-
   struct thread *current = thread_current();  // 현재 스레드 포인터 확보
   struct file *file = process_get_file(fd);   // fd에 연결된 파일 객체 조회
+
   // STDIN 더미 파일 포인터 준비
   struct file *stdin_file = syscall_get_std_file(STDIN_FILENO);
   // STDOUT 더미 파일 포인터 준비
@@ -423,8 +403,10 @@ int syscall_open(const char *file_name) {
 
   // 파일 등록에 실패한 경우 → 열린 파일 닫기
   if (fd == -1) {
+    lock_release(&filesys_lock);
     file_close(file);
   }
+
   // 파일 시스템 락 해제
   lock_release(&filesys_lock);
   palloc_free_page(k_file);
@@ -444,9 +426,11 @@ bool syscall_remove(const char *file) {
     syscall_exit(-1);
   }
 
+  lock_acquire(&filesys_lock);
+
   // 파일 시스템에 생성 시도
   bool success = filesys_remove(k_file);
-
+  lock_release(&filesys_lock);
   palloc_free_page(k_file);
   // 파일 시스템에서 해당 경로의 파일 삭제 시도, 성공 여부 반환
   return success;
@@ -462,9 +446,10 @@ bool syscall_create(const char *file, unsigned initial_size) {
     syscall_exit(-1);
   }
 
+  lock_acquire(&filesys_lock);
   // 파일 시스템에 생성 시도
   bool success = filesys_create(k_file, initial_size);
-
+  lock_release(&filesys_lock);
   palloc_free_page(k_file);
   return success;
 }
