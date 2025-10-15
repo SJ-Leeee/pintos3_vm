@@ -51,14 +51,8 @@ static void file_backed_destroy(struct page *page) {
     if (pml4_is_dirty(cur->pml4, page->va))
       file_write_at(file_info->file, page->frame->kva,
                     file_info->page_read_bytes, file_info->ofs);
-
-    // 더 이상 file_info 쓰지 않으면 free
-    // file_close(file_info->file);
     free(file_info);
   }
-
-  // 프레임 해제 // remove
-  // free(page->frame);
 }
 
 /* Do the mmap */
