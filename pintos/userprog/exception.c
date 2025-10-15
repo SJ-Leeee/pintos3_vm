@@ -139,6 +139,9 @@ static void page_fault(struct intr_frame *f) {
 #ifdef VM
   /* For project 3 and later. */
   if (vm_try_handle_fault(f, fault_addr, user, write, not_present)) return;
+  // printf("[PF-FAIL] addr=%p user=%d write=%d present=%d name=%s\n",
+  // fault_addr,
+  //        user, write, !not_present, thread_name());
 #endif
   page_fault_cnt++;
   // 유저의 잘못된 주소

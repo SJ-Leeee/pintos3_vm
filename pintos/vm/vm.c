@@ -172,23 +172,17 @@ static struct frame *vm_evict_frame(void) {
  * 프레임을 malloc, kva를 palloc 하고 반환*/
 static struct frame *vm_get_frame(void) {
   struct frame *frame = NULL;
-  // 물리메모리에 대응되는 커널주소
   void *kva = palloc_get_page(PAL_USER | PAL_ZERO);
   if (kva == NULL) {
-    frame = vm_evict_frame();
+    // evict 수행
+    frame = vm_evict_frame();  // 비워진 frame 리턴
+    kva = frame->kva;          // frame 안의 kva 재사용
   } else {
     frame = malloc(sizeof(struct frame));
-    if (frame == NULL) {
-      palloc_free_page(kva);
-    }
+    if (frame == NULL) PANIC("frame malloc failed!");
     frame->kva = kva;
-    frame->page = NULL;
   }
-  // list_insert(frame->elem,
-  // todo : 나중에 LRU func만들고 list_insert_ordered하기
-
-  ASSERT(frame != NULL);
-  ASSERT(frame->page == NULL);
+  frame->page = NULL;
   return frame;
 }
 

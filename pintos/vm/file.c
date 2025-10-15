@@ -45,13 +45,14 @@ static void file_backed_destroy(struct page *page) {
   struct file_page *file_page = &page->file;
   struct lazy_load_aux *file_info = file_page->fp_aux;
   struct thread *cur = thread_current();
-
   if (file_info) {
     // dirty(수정된) 페이지는 파일에 저장해야함
-    if (pml4_is_dirty(cur->pml4, page->va))
+    if (page->frame != NULL && pml4_is_dirty(cur->pml4, page->va))
       file_write_at(file_info->file, page->frame->kva,
                     file_info->page_read_bytes, file_info->ofs);
     free(file_info);
+    /* 추가 */
+    file_page->fp_aux = NULL;
   }
 }
 
