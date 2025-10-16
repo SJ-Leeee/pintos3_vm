@@ -71,7 +71,8 @@
     "inttypes.h": "c",
     "main.h": "c",
     "loader.h": "c",
-    "vaddr.h": "c"
+    "vaddr.h": "c",
+    "parallel-merge.h": "c"
   },
   /* 포맷팅 설정 */
   "editor.formatOnSave": true,
