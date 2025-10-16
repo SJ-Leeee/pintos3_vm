@@ -139,10 +139,18 @@ static void page_fault(struct intr_frame *f) {
 #ifdef VM
   /* For project 3 and later. */
   if (vm_try_handle_fault(f, fault_addr, user, write, not_present)) return;
+  // printf("[PF-FAIL] addr=%p user=%d write=%d present=%d name=%s\n",
+  // fault_addr,
+  //        user, write, !not_present, thread_name());
 #endif
-
-  /* Count page faults. */
   page_fault_cnt++;
+  // 유저의 잘못된 주소
+  if (!user && is_user_vaddr(fault_addr)) syscall_exit(-1);
+
+  struct supplemental_page_table *spt = &thread_current()->spt;
+  struct page *page = spt_find_page(spt, fault_addr);
+  // 접근권한
+  if (!page->writable && write) syscall_exit(-1);
 
   /* If the fault is true fault, show info and exit. */
   printf("Page fault at %p: %s error %s page in %s context.\n", fault_addr,

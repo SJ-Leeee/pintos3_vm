@@ -7,6 +7,11 @@
 // 추가한부분
 #include "threads/vaddr.h"
 #include "threads/mmu.h"
+#include "userprog/process.h"  // setup_stack
+#include "string.h"
+
+static bool valid_stack_growth(struct intr_frame *f, void *addr);
+static bool vm_stack_growth(void *addr);
 struct list frame_list;
 struct lock frame_lock;
 
@@ -62,6 +67,10 @@ bool vm_alloc_page_with_initializer(enum vm_type type, void *upage,
     /* 페이지의 가상주소와 권한을 할당 */
     page->va = upage;
     page->writable = writable;
+
+    /* mmap데이터 NULL 초기화 */
+    page->mmap_info = NULL;
+    page->mmap_page_index = -1;
 
     bool (*initializer)(struct page *, enum vm_type, void *kva) = NULL;
     switch (VM_TYPE(type)) {
@@ -129,11 +138,14 @@ bool spt_insert_page(struct supplemental_page_table *spt, struct page *page) {
 }
 
 void spt_remove_page(struct supplemental_page_table *spt, struct page *page) {
-  struct hash_elem *he = hash_delete(&spt->page_table, &page->hash_elem);
-  if (he != NULL) {
-    // double free 위험
-    vm_dealloc_page(page);
-  }
+  hash_delete(&spt->page_table, &page->hash_elem);
+  void *kva = page->frame->kva;
+  void *frame = page->frame;
+  void *va = page->va;
+  vm_dealloc_page(page);
+  pml4_clear_page(thread_current()->pml4, va);
+  palloc_free_page(kva);
+  free(frame);
 }
 
 /* Get the struct frame, that will be evicted. */
@@ -162,31 +174,41 @@ static struct frame *vm_get_frame(void) {
   struct frame *frame = NULL;
   void *kva = palloc_get_page(PAL_USER | PAL_ZERO);
   if (kva == NULL) {
-    frame = vm_evict_frame();
+    // evict 수행
+    frame = vm_evict_frame();  // 비워진 frame 리턴
+    kva = frame->kva;          // frame 안의 kva 재사용
   } else {
     frame = malloc(sizeof(struct frame));
-    if (frame == NULL) {
-      palloc_free_page(kva);
-    }
+    if (frame == NULL) PANIC("frame malloc failed!");
     frame->kva = kva;
-    frame->page = NULL;
   }
-  // list_insert(frame->elem,
-  // todo : 나중에 LRU func만들고 list_insert_ordered하기
-
-  ASSERT(frame != NULL);
-  ASSERT(frame->page == NULL);
+  frame->page = NULL;
   return frame;
 }
 
 /* Growing the stack. */
-static void vm_stack_growth(void *addr UNUSED) {}
+static bool vm_stack_growth(void *addr) {
+  struct thread *t = thread_current();
+  void *stack_bottom = (void *)t->stack_bottom;
+  void *ksp = pg_round_down(addr);
+  // 익명 페이지를 만들어서 성장시켜라
+  // 1. 이 주소에 대해서 익명으로 할당하고 매핑
+  while (stack_bottom > ksp) {
+    stack_bottom = (void *)(((uint8_t *)stack_bottom) - PGSIZE);
+    if (!vm_alloc_page_with_initializer(VM_MARKER_0 | VM_ANON, stack_bottom,
+                                        true, NULL, NULL))
+      return false;
+
+    if (!vm_claim_page(stack_bottom)) return false;
+  }
+  t->stack_bottom = stack_bottom;
+  return true;
+}
 
 /* Handle the fault on write_protected page */
 static bool vm_handle_wp(struct page *page UNUSED) {}
 
-/* Return true on success */
-bool vm_try_handle_fault(struct intr_frame *f UNUSED, void *addr, bool user,
+bool vm_try_handle_fault(struct intr_frame *f, void *addr, bool user,
                          bool write, bool not_present) {
   /* addr 없으면 false*/
   if (addr == NULL) return false;
@@ -195,16 +217,24 @@ bool vm_try_handle_fault(struct intr_frame *f UNUSED, void *addr, bool user,
   /* PTE가 있는데 들어왔다면 false */
   if (!not_present) return false;
 
-  struct supplemental_page_table *spt = &thread_current()->spt;
-  struct page *page = NULL;
-  page = spt_find_page(spt, addr);
+  struct thread *t = thread_current();
+  struct supplemental_page_table *spt = &t->spt;
 
-  /* page가 없으면 false */
-  if (page == NULL) return false;
-  /* writable은 false인데 write가 true로 오면 false*/
-  if (!page->writable && write) return false;
+  // 1. 매핑된 페이지가 있다면  그걸 스왑인
+  struct page *page = spt_find_page(spt, addr);
+  if (page != NULL) return vm_do_claim_page(page);
 
-  return vm_do_claim_page(page);
+  // 2. 없으면 스택 확장 조건을 검사
+  if (valid_stack_growth(f, addr)) return vm_stack_growth(addr);
+
+  // 3. 그 외는 fault 처리 불가
+  return false;
+}
+
+static bool valid_stack_growth(struct intr_frame *f, void *addr) {
+  // 최상단과 최하단사이
+  return (addr >= f->rsp - 32 && addr < USER_STACK &&
+          addr >= USER_STACK - (1 << 20));
 }
 
 /* Free the page.
@@ -221,19 +251,14 @@ void vm_dealloc_page(struct page *page) {
 bool vm_claim_page(void *va) {
   struct page *page = NULL;
 
-  if (va == NULL || is_kernel_vaddr(va)) {
-    return false;
-  }
+  if (va == NULL || is_kernel_vaddr(va)) return false;
+
   // spt를 넣어야함.
   page = spt_find_page(&thread_current()->spt, va);
-  if (page == NULL) {
-    return false;
-  }
+  if (page == NULL) return false;
 
   bool is_success = vm_do_claim_page(page);  // 페이지에 프레임 할당
-  if (!is_success) {
-    free(page);
-  }
+  if (!is_success) free(page);
 
   return is_success;
 }
@@ -261,8 +286,61 @@ void supplemental_page_table_init(struct supplemental_page_table *spt UNUSED) {
 }
 
 /* Copy supplemental page table from src to dst */
-bool supplemental_page_table_copy(struct supplemental_page_table *dst UNUSED,
-                                  struct supplemental_page_table *src UNUSED) {}
+/* Copy supplemental page table from src to dst */
+bool supplemental_page_table_copy(struct supplemental_page_table *dst,
+                                  struct supplemental_page_table *src) {
+  struct hash_iterator i;
+  hash_first(&i, &src->page_table);
+
+  while (hash_next(&i)) {
+    struct page *parent_page = hash_entry(hash_cur(&i), struct page, hash_elem);
+    enum vm_type t = VM_TYPE(parent_page->operations->type);
+
+    void *pva = parent_page->va;
+    bool p_wrt = parent_page->writable;
+
+    switch (t) {
+      case VM_UNINIT:
+
+        struct lazy_load_aux *p_aux = parent_page->uninit.aux;
+        struct lazy_load_aux *c_aux = malloc(sizeof(struct lazy_load_aux));
+
+        vm_initializer *init_fn = parent_page->uninit.init;
+        if (!c_aux) return false;
+        *c_aux = (struct lazy_load_aux){
+            .file = file_reopen(p_aux->file),
+            .ofs = p_aux->ofs,
+            .page_read_bytes = p_aux->page_read_bytes,
+            .page_zero_bytes = p_aux->page_zero_bytes,
+        };
+
+        if (!vm_alloc_page_with_initializer(page_get_type(parent_page), pva,
+                                            p_wrt, init_fn, c_aux)) {
+          file_close(c_aux->file);
+          free(c_aux);
+          return false;
+        }
+        break;
+
+      case VM_ANON:
+      case VM_FILE:
+        // 여기서 페이지새로 만들고, 새 프레임할당.
+        if (!(vm_alloc_page(t, pva, p_wrt) && vm_claim_page(pva))) {
+          return false;
+        }
+
+        struct page *c_page = spt_find_page(dst, pva);
+        if (!c_page) return false;
+
+        memcpy(c_page->frame->kva, parent_page->frame->kva, PGSIZE);
+        break;
+      default:
+        return false;
+        break;
+    }
+  }
+  return true;
+}
 
 /* Free the resource hold by the supplemental page table */
 void supplemental_page_table_kill(struct supplemental_page_table *spt) {

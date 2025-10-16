@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "vm/vm.h"
 
 #include "filesys/directory.h"
 #include "filesys/file.h"
@@ -44,14 +45,6 @@ static struct semaphore initd_sema;
 // extern → 다른 파일에 정의된 전역 변수를 여기서 참조하겠다는 의미
 extern bool thread_tests; /* threads/init.c 파일 안에서 정의되어 있다 */
 
-#ifdef VM
-struct lazy_load_aux {
-  struct file *file;
-  off_t ofs;
-  size_t page_read_bytes;
-  size_t page_zero_bytes;
-};
-#endif
 /* General process initializer for initd and other process. */
 static void process_init(void) {
   struct thread *current = thread_current();
@@ -351,18 +344,18 @@ static void __do_fork(void *aux) {
 
   /* 새 스레드가 사용할 FDT, FD 인덱스 등 기본 자료구조를 초기화한다. */
   process_init();
-  struct file *stdin_file = syscall_get_std_file(
-      STDIN_FILENO);  // 부모와 동일한 STDIN 더미 포인터 캐싱
-  struct file *stdout_file = syscall_get_std_file(
-      STDOUT_FILENO);  // 부모와 동일한 STDOUT 더미 포인터 캐싱
+  // 부모와 동일한 STDIN 더미 포인터 캐싱
+  struct file *stdin_file = syscall_get_std_file(STDIN_FILENO);
+  // 부모와 동일한 STDOUT 더미 포인터 캐싱
+  struct file *stdout_file = syscall_get_std_file(STDOUT_FILENO);
+  // 부모 상태를 그대로 채우기 위해 자식 FDT를 먼저 비워 둠
   for (int fd = 0; fd < MAX_FD; fd++) {
-    current->FDT[fd] =
-        NULL;  // 부모 상태를 그대로 채우기 위해 자식 FDT를 먼저 비워 둠
+    current->FDT[fd] = NULL;
   }
-  current->stdin_count =
-      0;  // 부모 복사를 통해 실제 STDIN 참조 개수를 다시 계산할 예정
-  current->stdout_count =
-      0;  // 부모 복사를 통해 실제 STDOUT 참조 개수를 다시 계산할 예정
+  // 부모 복사를 통해 실제 STDIN 참조 개수를 다시 계산할 예정
+  current->stdin_count = 0;
+  // 부모 복사를 통해 실제 STDOUT 참조 개수를 다시 계산할 예정
+  current->stdout_count = 0;
 
   /* 부모가 fork 시스템 콜을 호출하던 시점의 레지스터 값을 자식 intr_frame에
    * 그대로 복사한다. */
@@ -380,17 +373,13 @@ static void __do_fork(void *aux) {
 #ifdef VM
   /* 새로 만든 pml4를 활성화한 뒤, VM 기능 사용 시 부모의 SPT 엔트리를
    * 순회하면서 lazy load 정보까지 복사한다. */
-#else
-  /* VM 기능이 없다면 부모의 pml4를 직접 순회해 사용자 페이지를 새로 할당하고
-   * 내용을 복제한다. */
-#endif
-#ifdef VM
   if (!supplemental_page_table_copy(&current->spt, &parent->spt)) {
     succ = false;
     goto done;
   }
 #else
-  /* VM 미사용 시 부모의 PTE를 순회하며 자식 페이지를 만들어 붙인다. */
+  /* VM 기능이 없다면 부모의 pml4를 직접 순회해 사용자 페이지를 새로 할당하고
+   * 내용을 복제한다. */
   if (!pml4_for_each(parent->pml4, duplicate_pte, parent)) {
     succ = false;
     goto done;
@@ -498,8 +487,9 @@ int process_exec(void *f_name) {
 
   /* If load failed, free f_name and quit. */
   if (!success) {
-    palloc_free_page(f_name);
-    return -1;
+    // palloc_free_page(f_name);
+    syscall_exit(-1);
+    // return -1;
   }
 
   argument_stack(argv, argc, &_if);
@@ -549,34 +539,47 @@ int process_wait(tid_t child_tid) {
   return stat;
 }
 
-/* Exit the process. This function is called by thread_exit (). */
+/**
+ * 1. mmap 영역삭제
+ * 2. fdt 삭제
+ * 3. running파일 삭제
+ * 4. spt + pte 삭제
+ */
 void process_exit(void) {
   // 현재 종료 중인 프로세스(thread)를 가져옴
-  struct thread *current_thread = thread_current();
+  struct thread *t = thread_current();
+  // 현재 스레드의 mmap 리스트를 순회하면서 해제
+  struct list_elem *e = list_begin(&t->mm_list);
+  for (e; e != list_end(&t->mm_list);) {
+    struct mmap_info *mp = list_entry(e, struct mmap_info, elem);
+    e = list_next(e);  // 다음 원소 미리 저장 (안에서 삭제됨)
+    do_munmap(mp->start_addr);
+  }
 
   // 파일 디스크럽터 테이블(FDT)이 존재한다면 열린 파일을 모두 닫는다.
-  if (current_thread->FDT != NULL) {
+  if (t->FDT != NULL) {
     for (int fd = 0; fd < MAX_FD; fd++) {
-      if (current_thread->FDT[fd] != NULL) {
-        syscall_close(
-            fd);  // dup_count와 STDIN/STDOUT 카운트를 반영하며 안전하게 닫기
+      if (t->FDT[fd] != NULL) {
+        // dup_count와 STDIN/STDOUT 카운트를 반영하며 안전하게 닫기
+        syscall_close(fd);
       }
     }
     // 파일 디스크럽터 테이블에 할당했던 메모리 해제
-    palloc_free_multiple(current_thread->FDT, FDT_PAGES);
+    palloc_free_multiple(t->FDT, FDT_PAGES);
   }
 
-  file_close(current_thread->running_file);
+  file_close(t->running_file);
+  t->running_file = NULL;
 
   // syscall의 exit에서 exit_status 설정이 선행되어야함
-  if (current_thread->parent != NULL) {
-    sema_up(&current_thread->wait_sema);
+  if (t->parent != NULL) {
+    sema_up(&t->wait_sema);
     // 부모가 살아 있고(또는 기다릴 의사 표시가 됐다면)만 기다림
-    if (current_thread->parent->status != THREAD_DYING) {
-      sema_down(&current_thread->exit_sema);
+    if (t->parent->status != THREAD_DYING) {
+      sema_down(&t->exit_sema);
     }
   }
-
+  // 모든 spt삭제
   process_cleanup();
 }
 
@@ -593,13 +596,6 @@ static void process_cleanup(void) {
    * to the kernel-only page directory. */
   pml4 = curr->pml4;
   if (pml4 != NULL) {
-    /* Correct ordering here is crucial.  We must set
-     * cur->pagedir to NULL before switching page directories,
-     * so that a timer interrupt can't switch back to the
-     * process page directory.  We must activate the base page
-     * directory before destroying the process's page
-     * directory, or our active page directory will be one
-     * that's been freed (and cleared). */
     curr->pml4 = NULL;
     pml4_activate(NULL);
     pml4_destroy(pml4);
@@ -697,7 +693,10 @@ static bool load(const char *file_name, struct intr_frame *if_) {
   process_activate(thread_current());
 
   /* Open executable file. */
+
+  lock_acquire(&filesys_lock);
   file = filesys_open(file_name);
+  lock_release(&filesys_lock);
   if (file == NULL) {
     printf("load: %s: open failed\n", file_name);
     goto done;
@@ -771,7 +770,6 @@ static bool load(const char *file_name, struct intr_frame *if_) {
 
   /* Start address. */
   if_->rip = ehdr.e_entry;
-
   /* TODO: Your code goes here.
    * TODO: Implement argument passing (see project2/argument_passing.html). */
 
@@ -1052,7 +1050,7 @@ static bool install_page(void *upage, void *kpage, bool writable) {
  * If you want to implement the function for only project 2, implement it on the
  * upper block. */
 
-static bool lazy_load_segment(struct page *page, void *aux) {
+bool lazy_load_segment(struct page *page, void *aux) {
   struct lazy_load_aux *llaux = (struct lazy_load_aux *)aux;
   void *kva = page->frame->kva;
   off_t read_bytes = file_read_at(
@@ -1148,7 +1146,8 @@ static bool setup_stack(struct intr_frame *if_) {
     if_->rsp = USER_STACK;
     success = true;
   }
-
+  /* 새로운 스택최하단 */
+  cur->stack_bottom = stack_bottom;
   return success;
 }
 #endif /* VM */
